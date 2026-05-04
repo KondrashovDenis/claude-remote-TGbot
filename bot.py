@@ -23,17 +23,23 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 ROOT = Path(__file__).parent
 STATE = ROOT / "state"
 RESPONSES = STATE / "responses"
+PENDING_QUESTION = STATE / "pending_question"
+ANSWERS = STATE / "answers"
 LOGS = ROOT / "logs"
 
 LOGS.mkdir(exist_ok=True)
 STATE.mkdir(exist_ok=True)
 RESPONSES.mkdir(exist_ok=True)
+PENDING_QUESTION.mkdir(exist_ok=True)
+ANSWERS.mkdir(exist_ok=True)
 
 load_dotenv(ROOT / ".env")
 
@@ -124,6 +130,51 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"edit_message failed: {e}")
 
 
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик текстовых сообщений (не команд) — для двустороннего flow
+    через MCP tool `ask`. Если есть pending question — пишем ответ в файл,
+    mcp_server.py его подхватит.
+    """
+    if not is_allowed(update):
+        return
+    if update.message is None or update.message.text is None:
+        return
+    text = update.message.text.strip()
+    if not text or text.startswith("/"):
+        return  # команда, обработается соответствующим handler'ом
+
+    # Берём самый старый pending question (FIFO)
+    pending_files = sorted(
+        PENDING_QUESTION.glob("*.json"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if not pending_files:
+        await update.message.reply_text(
+            "Нет активного вопроса от Claude. Сообщение проигнорировано.\n"
+            "Когда Claude позовёт через mcp__remote-bot__ask — отвечай в этот чат."
+        )
+        return
+
+    pending = pending_files[0]
+    req_id = pending.stem
+
+    # Пишем ответ в state/answers/<req_id>.txt
+    answer_file = ANSWERS / f"{req_id}.txt"
+    answer_file.write_text(text, encoding="utf-8")
+
+    # Удаляем pending — слот освобождён
+    try:
+        pending.unlink()
+    except Exception:
+        pass
+
+    logger.info(f"[{req_id}] text answer accepted ({len(text)} chars)")
+    await update.message.reply_text(
+        f"[OK] Ответ передан Claude (req_id={req_id}, {len(text)} символов)."
+    )
+
+
 async def on_error(update, ctx):
     logger.error(f"handler error: {ctx.error}")
 
@@ -142,6 +193,8 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))
+    # Текстовые сообщения (не команды) — для ответов на mcp__remote-bot__ask
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 
     try:

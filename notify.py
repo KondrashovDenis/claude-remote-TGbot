@@ -127,8 +127,11 @@ def format_message(event: str, payload: dict) -> str:
 
         text = "<b>Claude закончил отвечать</b>\n\nГотов ждать твой ввод."
         if last:
-            preview_len = 200
-            preview = last[:preview_len].replace("<", "&lt;").replace(">", "&gt;")
+            # Telegram лимит на сообщение - 4096 символов. Оставляем запас на
+            # заголовок (~50 chars) и на расширение HTML-escape (& → &amp; и т.п.).
+            # 3500 даёт безопасный запас в большинстве случаев.
+            preview_len = 3500
+            preview = last[:preview_len].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             suffix = "..." if len(last) > preview_len else ""
             text += f"\n\n<i>{preview}{suffix}</i>"
         return text
