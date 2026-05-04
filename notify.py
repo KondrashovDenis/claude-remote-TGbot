@@ -217,9 +217,6 @@ def main():
         if not already_blocked:
             transcript_path = payload.get("transcript_path", "")
             last_text = get_last_assistant_text(transcript_path)
-            # DEBUG: фиксируем что именно увидел hook
-            log(f"[Stop] transcript={transcript_path}")
-            log(f"[Stop] last_text len={len(last_text)} tail200={last_text[-200:]!r}")
             if looks_like_question(last_text):
                 log("[Stop] question detected, blocking to force ask tool")
                 send_telegram_text(

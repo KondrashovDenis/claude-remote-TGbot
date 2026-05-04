@@ -1,5 +1,7 @@
 # Claude Remote Bot
 
+> 🇷🇺 Русский · [🇬🇧 English](README.en.md)
+
 Telegram-мост для **Claude Desktop / Claude Code**: одобряй tool calls и **отвечай на вопросы Claude текстом** прямо из Telegram, когда не у компа.
 
 <p align="center">
