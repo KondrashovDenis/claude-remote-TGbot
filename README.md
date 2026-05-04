@@ -2,6 +2,8 @@
 
 > 🇷🇺 Русский · [🇬🇧 English](README.en.md)
 
+[![tests](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/tests.yml/badge.svg)](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/tests.yml)
+
 Telegram-мост для **Claude Desktop / Claude Code**: одобряй tool calls и **отвечай на вопросы Claude текстом** прямо из Telegram, когда не у компа.
 
 <p align="center">
@@ -248,6 +250,16 @@ tail -f logs/mcp.log     # MCP server (вопросы и ответы)
 # В Telegram
 /start    # подключение
 /status   # текущее состояние (АКТИВЕН/выключен) + PID
+```
+
+## Тесты
+
+Pytest на pure-функциях `looks_like_question` и `get_last_assistant_text`.
+В CI прогоняется на матрице Linux / macOS / Windows × Python 3.11 / 3.12.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ## Лицензия

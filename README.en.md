@@ -2,6 +2,8 @@
 
 > 🇬🇧 English · [🇷🇺 Русский](README.md)
 
+[![tests](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/tests.yml/badge.svg)](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/tests.yml)
+
 A Telegram bridge for **Claude Desktop / Claude Code**: approve tool calls and **answer Claude's questions in plain text** straight from Telegram while you're away from your computer.
 
 <p align="center">
@@ -248,6 +250,16 @@ tail -f logs/mcp.log     # MCP server (questions and answers)
 # Inside Telegram
 /start    # connection
 /status   # current state (active/off) + PID
+```
+
+## Tests
+
+Pytest on the pure helpers `looks_like_question` and `get_last_assistant_text`.
+CI runs the suite across Linux / macOS / Windows × Python 3.11 / 3.12.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ## License
