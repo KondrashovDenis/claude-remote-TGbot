@@ -53,7 +53,7 @@ load_dotenv(ROOT / ".env")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-TIMEOUT = int(os.getenv("APPROVAL_TIMEOUT", "300"))
+TIMEOUT = int(os.getenv("APPROVAL_TIMEOUT", "60"))
 
 
 def log(msg: str):
@@ -256,8 +256,9 @@ def main():
         )
         r.raise_for_status()
     except Exception as e:
-        log(f"[{req_id}] send failed: {e}")
-        block(f"Не удалось доставить запрос на approval в Telegram: {e}")
+        # ТГ недоступен → graceful degradation на Desktop UI prompt.
+        log(f"[{req_id}] send failed: {e} — passthrough to Desktop UI")
+        passthrough()
 
     # Ждём ответа (polling файла)
     response_file = RESPONSES / f"{req_id}.json"
@@ -279,8 +280,13 @@ def main():
                 block(f"Ошибка чтения ответа: {e}")
         time.sleep(0.5)
 
-    log(f"[{req_id}] timeout {TIMEOUT}s")
-    block(f"Таймаут ожидания ответа в Telegram ({TIMEOUT}s)")
+    # Таймаут — graceful degradation: passthrough вместо блокировки. Тогда
+    # Claude Desktop отрисует свой permission prompt и пользователь сможет
+    # ответить локально. Это страхует от ситуации, когда ТГ-bot завис, не
+    # доставил callback или Денис не у телефона. Лучше двойной prompt
+    # (если потом и в ТГ нажмёт), чем глухой блок.
+    log(f"[{req_id}] timeout {TIMEOUT}s — passthrough to Desktop UI")
+    passthrough()
 
 
 if __name__ == "__main__":

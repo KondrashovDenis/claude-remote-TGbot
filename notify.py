@@ -17,6 +17,7 @@ Fire-and-forget уведомление в Telegram для Stop / Notification ho
 - Notification event — Claude нужно внимание пользователя (вопрос/блокировка)
 """
 import os
+import re
 import sys
 import json
 from pathlib import Path
@@ -55,8 +56,51 @@ def log(msg: str):
 
 def silent_exit():
     """Выход без вмешательства в работу Claude."""
-    print(json.dumps({}))
+    print(json.dumps({}), flush=True)
     sys.exit(0)
+
+
+def block_stop(reason: str):
+    """Заблокировать Stop event — Claude получит reason и продолжит turn."""
+    print(json.dumps({"decision": "block", "reason": reason}), flush=True)
+    sys.exit(0)
+
+
+def looks_like_question(text: str) -> bool:
+    """
+    Эвристика: содержит ли хвост ответа вопрос к пользователю.
+
+    Только проверка наличия знака вопроса в последних 400 символах,
+    исключая содержимое fenced code-блоков и inline-кода (чтобы
+    знак вопроса внутри примера кода не триггерил false positive).
+    Маркеры типа "делать", "продолжить" и т.п. убраны — они слишком
+    часто встречаются в нарративе и дают ложные срабатывания.
+    Если автор формулирует вопрос без знака вопроса — это редкий
+    кейс, false negative окей.
+    """
+    if not text:
+        return False
+    tail = text[-400:]
+    cleaned = re.sub(r"```.*?```", "", tail, flags=re.DOTALL)
+    cleaned = re.sub(r"`[^`]*`", "", cleaned)
+    return "?" in cleaned
+
+
+def send_telegram_text(text: str):
+    """Отправка короткого уведомления в ТГ. Best-effort, ошибки молча."""
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            json={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_notification": False,
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        log(f"send_telegram_text failed: {e}")
 
 
 def get_last_assistant_text(transcript_path_str: str) -> str:
@@ -164,6 +208,32 @@ def main():
     if not TOKEN or not CHAT_ID:
         log(f"[{event}] WARN: .env missing TOKEN/CHAT_ID")
         silent_exit()
+
+    # Stop event + вопрос в конце ответа → блокируем, чтобы Claude перевызвал
+    # через mcp__remote-bot__ask. Защита от цикла: stop_hook_active=True
+    # значит блокировка уже была — больше не блокируем.
+    if event == "Stop":
+        already_blocked = bool(payload.get("stop_hook_active", False))
+        if not already_blocked:
+            transcript_path = payload.get("transcript_path", "")
+            last_text = get_last_assistant_text(transcript_path)
+            # DEBUG: фиксируем что именно увидел hook
+            log(f"[Stop] transcript={transcript_path}")
+            log(f"[Stop] last_text len={len(last_text)} tail200={last_text[-200:]!r}")
+            if looks_like_question(last_text):
+                log("[Stop] question detected, blocking to force ask tool")
+                send_telegram_text(
+                    "⚠ <b>Stop hook сработал</b>\n\n"
+                    "Claude задал вопрос текстом, не вызвав <code>ask</code>. "
+                    "Заставляю перевызвать через инструмент."
+                )
+                block_stop(
+                    "Remote Bot is active — the user is not at the keyboard. "
+                    "You ended your turn with a question, but when Remote Bot is "
+                    "active you MUST use the mcp__remote-bot__ask tool for any "
+                    "question to the user. Re-issue your last question now via "
+                    "mcp__remote-bot__ask. Do NOT just repeat the question as text."
+                )
 
     text = format_message(event, payload)
     log(f"[{event}] sending notification")
