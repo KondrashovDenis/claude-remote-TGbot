@@ -1,116 +1,144 @@
 # Claude Remote Bot
 
-Telegram-бот для удалённого approve/deny tool-запросов Claude Code, когда Денис не за компом.
+Telegram-мост для **Claude Desktop / Claude Code**: одобряй tool calls и **отвечай на вопросы Claude текстом** прямо из Telegram, когда не у компа.
 
-Работает через три hook'а в `~/.claude/settings.json` + MCP-сервер для двустороннего диалога:
-- **PreToolUse** (hook.py) — на каждый tool call. Hook сам читает `permissions.allow` из settings.json: если tool покрыт — passthrough без push. Если нет — push с Allow/Deny в ТГ.
-- **Stop** (notify.py Stop) — fire-and-forget push когда Claude закончил отвечать. С превью текста последнего сообщения (читается из transcript JSONL).
-- **Notification** (notify.py Notification) — fire-and-forget push когда Claude требует внимания.
-- **MCP tool `ask`** (mcp_server.py) — Claude может задать Денису вопрос через ТГ и получить **текстовый ответ** обратно в той же сессии. Денис не за компом → отвечает из Telegram → Claude продолжает работу. Конфигурируется в `~/.claude/mcp.json`.
+<p align="center">
+  <img src="ccmascot.jpg" alt="Claude Code mascot" width="240"/>
+</p>
 
-Включается/выключается slash-командами `/remotebotstart` и `/remotebotstop` прямо из Claude Code.
+## Зачем
 
-## Архитектура
+Claude часто упирается в подтверждение — нажать Allow на bash-команду, edit файла, MCP-tool вне `permissions.allow`. Если ты отошёл от компа — сессия зависает на permission-prompt. А ещё Claude нередко задаёт уточняющие вопросы текстом в чате — тоже без тебя они никому не видны.
 
-```
-Сценарий 1 — tool требует подтверждения:
-       Claude Code → PreToolUse hook (hook.py)
-              │
-              ├── state/active нет ──► passthrough (обычный flow: либо auto-allow,
-              │                                     либо UI prompt в Desktop)
-              │
-              ├── state/active есть И tool покрыт permissions.allow ──► passthrough
-              │   (быстрый путь: tool пройдёт обычным auto-approve, без push)
-              │
-              └── state/active есть И tool НЕ покрыт permissions.allow:
-                     │
-                     ▼
-                Telegram API: sendMessage + inline-кнопки Allow/Deny
-                     │
-                hook.py polling state/responses/<req_id>.json (до APPROVAL_TIMEOUT)
-                     │
-              ┌──────┴──────┐
-              ▼             ▼
-   {hookSpecificOutput.   {hookSpecificOutput.
-    permissionDecision:    permissionDecision:
-    "allow"}               "deny",
-                          "permissionDecisionReason": ...}
+Этот бот закрывает оба кейса:
 
-Сценарий 2 — Claude закончил / нужно внимание:
-       Claude Code → Stop / Notification hook (notify.py)
-              │
-              ├── state/active нет ──► silent exit
-              │
-              └── state/active есть:
-                     │
-                     ▼
-                Stop: читаем transcript_path JSONL, берём текст последнего
-                      assistant-сообщения, превью первые 200 символов
-                Notification: текст из payload.message
-                     │
-                     ▼
-                Telegram API: sendMessage БЕЗ кнопок (информация)
-                fire-and-forget, не блокирует Claude
+1. **PreToolUse hook** — ловит permission requests до отрисовки Desktop UI и пушит их в Telegram с кнопками Allow / Deny
+2. **MCP tool `ask`** — Claude может задать **текстовый вопрос** и получить **текстовый ответ** через Telegram, продолжая ту же сессию
+3. **Stop hook** — если Claude по привычке задал вопрос текстом в чате, hook ловит знак вопроса в хвосте ответа и блокирует завершение turn'а, заставляя Claude перевызвать через `ask`
+4. **Graceful degradation** — если Telegram недоступен или бот завис, hook автоматически делает passthrough на обычный Desktop UI prompt; ты не блокирован
 
-bot.py (daemon, отдельный процесс):
-   слушает Telegram updates → callback_query на Allow/Deny
-   → пишет state/responses/<req_id>.json для hook.py
-```
+## Фичи
 
-**Почему не PermissionRequest event?** Логически он подходит больше (срабатывает только на не-auto-approved tools), но в Claude Desktop версии 2.1.121 hook output **не закрывает** встроенный UI prompt — он висит параллельно с push в ТГ. Пришлось бы отвечать дважды. PreToolUse перехватывает permission ДО отрисовки UI prompt'а, но видит ВСЕ tool calls — поэтому фильтр `permissions.allow` реализован самостоятельно в `hook.py:is_auto_approved`.
+- **Smart auto-approve.** Hook парсит `permissions.allow` из `~/.claude/settings.json` сам — если tool call покрыт паттерном (`Bash(npm *)`, `mcp__github__*` и т.п.), пуш в Telegram не идёт.
+- **Двусторонний диалог через MCP `ask`.** Не только approve/deny, но и текстовые ответы.
+- **Question detection.** Stop hook детектит `?` в последних 400 символах ответа Claude (исключая code-блоки) и форсит использование `ask`.
+- **Allowlist по chat_id.** Бот реагирует только на сообщения с твоего `TELEGRAM_CHAT_ID`. Узнает username бота сторонний — команды отдать не сможет.
+- **Graceful TG-down fallback.** При ошибке отправки в TG или таймауте 60s ожидания ответа hook возвращает passthrough вместо block — Desktop UI отрисует свой prompt.
+
+## Как это работает
 
 ```
-Сценарий 3 — Claude задаёт Денису вопрос (двусторонний flow):
-       Claude → mcp__remote-bot__ask("вопрос?")
-              │
-              ▼
-       mcp_server.py:
-              │
-              ├── state/active нет ──► return "ERROR: bot не активен"
-              │                        (Claude делает fallback на текст в чате)
-              │
-              └── state/active есть И нет pending question:
-                     │
-                     ├── записывает state/pending_question/<req_id>.json
-                     ├── шлёт в ТГ через Telegram API (force_reply: true)
-                     └── polling state/answers/<req_id>.txt (до timeout_seconds)
+┌─ Сценарий 1: tool требует подтверждения ────────────────────────┐
+│  Claude → PreToolUse hook (hook.py)                              │
+│    │                                                              │
+│    ├─ state/active нет → passthrough (обычный Desktop flow)      │
+│    ├─ покрыт permissions.allow → passthrough (без push)          │
+│    └─ не покрыт → push в TG с Allow/Deny                         │
+│         polling state/responses/<id>.json                        │
+│         ├─ approve → permissionDecision: "allow"                 │
+│         ├─ deny → permissionDecision: "deny"                     │
+│         └─ timeout 60s или ошибка TG → passthrough (Desktop UI)  │
+└──────────────────────────────────────────────────────────────────┘
 
-       bot.py при получении текстового сообщения от ALLOWED_CHAT_ID:
-              ├── ищет самый старый pending question
-              ├── пишет state/answers/<req_id>.txt
-              └── удаляет state/pending_question/<req_id>.json
+┌─ Сценарий 2: Claude задаёт текстовый вопрос ────────────────────┐
+│  Claude → mcp__remote-bot__ask("какой вариант — A или B?")      │
+│    └─ pending_question/<id>.json + push в TG (force_reply)       │
+│         polling state/answers/<id>.txt до timeout                │
+│         └─ возвращает текст ответа Claude'у                      │
+│                                                                   │
+│  bot.py при текстовом сообщении от ALLOWED_CHAT:                 │
+│    └─ ищет старейший pending → пишет answer file → удаляет PEND  │
+└──────────────────────────────────────────────────────────────────┘
 
-       mcp_server.py читает answers/, удаляет, возвращает текст Claude'у.
-       Claude получает результат tool call → продолжает в той же сессии.
+┌─ Сценарий 3: Claude закончил с вопросом, забыл ask ─────────────┐
+│  Stop hook (notify.py Stop)                                      │
+│    └─ читает transcript_path → последнее assistant сообщение     │
+│         └─ есть '?' в хвосте → {decision:block, reason}          │
+│              Claude вынужден перевызвать через ask               │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Почему PreToolUse, а не PermissionRequest?** Логически PermissionRequest подходит больше, но в Claude Desktop hook output **не закрывает** встроенный UI prompt — он висит параллельно с push в TG, надо отвечать дважды. PreToolUse перехватывает permission ДО отрисовки UI, но видит ВСЕ tool calls — поэтому фильтр `permissions.allow` реализован самостоятельно в `hook.py:is_auto_approved`.
+
+## Файлы
+
+```
+.
+├── bot.py                  # Telegram daemon: callback queries (Allow/Deny) + текстовые ответы
+├── hook.py                 # PreToolUse hook: фильтр permissions.allow + push approve/deny
+├── notify.py               # Stop / Notification hook: question detection + push notif
+├── mcp_server.py           # MCP server: tool `ask` для двустороннего диалога
+├── requirements.txt
+├── .env.example
+├── examples/
+│   └── commands/           # slash-команды для Claude Code
+│       ├── remotebotstart.md
+│       └── remotebotstop.md
+├── state/                  # runtime IPC (gitignored содержимое)
+│   ├── active              # флаг "бот пушит в TG"
+│   ├── bot.pid
+│   ├── pending_question/<id>.json
+│   ├── answers/<id>.txt
+│   └── responses/<id>.json
+└── logs/
 ```
 
 ## Установка
 
-### 1. Создать ТГ-бота
-@BotFather → /newbot → имя/username → получить token.
+### 1. Создать TG-бота
+[@BotFather](https://t.me/BotFather) → `/newbot` → имя/username → получить token.
 
 ### 2. Узнать свой chat_id
-@userinfobot → отправить любое сообщение → получить ID.
+[@userinfobot](https://t.me/userinfobot) → отправить любое сообщение → получить numeric ID.
 
-### 3. Заполнить .env
-```
-cp D:\Claude\claude-remote-bot\.env.example D:\Claude\claude-remote-bot\.env
-```
-Открыть `.env` и заполнить:
-- `TELEGRAM_BOT_TOKEN` — из BotFather
-- `TELEGRAM_BOT_NAME` — username бота без `@`
-- `TELEGRAM_CHAT_ID` — твой ID (числовой)
-- `APPROVAL_TIMEOUT` — секунды ожидания ответа (по умолчанию 300)
+### 3. Клонировать и заполнить .env
 
-### 4. Установить Python-зависимости
-```
-pip install -r D:\Claude\claude-remote-bot\requirements.txt
+```bash
+git clone https://github.com/KondrashovDenis/claude-remote-TGbot.git
+cd claude-remote-TGbot
+cp .env.example .env
+# открыть .env и заполнить:
+#   TELEGRAM_BOT_TOKEN  — из BotFather
+#   TELEGRAM_BOT_NAME   — username бота без @
+#   TELEGRAM_CHAT_ID    — твой numeric ID
+#   APPROVAL_TIMEOUT    — секунды ожидания ответа (по умолчанию 60)
 ```
 
-### 5. Прописать hooks в `~/.claude/settings.json`
+### 4. Установить зависимости
+
+```bash
+pip install -r requirements.txt
+```
+
+### 5. Зарегистрировать MCP server
+
+В `~/.claude/mcp.json` (или эквивалентном для твоего клиента):
 
 ```json
 {
+  "mcpServers": {
+    "remote-bot": {
+      "command": "python",
+      "args": ["/path/to/claude-remote-TGbot/mcp_server.py"]
+    }
+  }
+}
+```
+
+### 6. Прописать hooks и permissions в `~/.claude/settings.json`
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "ToolSearch",
+      "mcp__remote-bot__ask",
+      "Bash(*claude-remote-TGbot*)"
+    ]
+  },
+  "env": {
+    "MCP_TOOL_TIMEOUT": "3700000"
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -118,8 +146,8 @@ pip install -r D:\Claude\claude-remote-bot\requirements.txt
         "hooks": [
           {
             "type": "command",
-            "command": "python D:/Claude/claude-remote-bot/hook.py",
-            "timeout": 360
+            "command": "python /path/to/claude-remote-TGbot/hook.py",
+            "timeout": 90
           }
         ]
       }
@@ -129,9 +157,8 @@ pip install -r D:\Claude\claude-remote-bot\requirements.txt
         "hooks": [
           {
             "type": "command",
-            "command": "python D:/Claude/claude-remote-bot/notify.py Stop",
-            "timeout": 10,
-            "async": true
+            "command": "python /path/to/claude-remote-TGbot/notify.py Stop",
+            "timeout": 15
           }
         ]
       }
@@ -141,7 +168,7 @@ pip install -r D:\Claude\claude-remote-bot\requirements.txt
         "hooks": [
           {
             "type": "command",
-            "command": "python D:/Claude/claude-remote-bot/notify.py Notification",
+            "command": "python /path/to/claude-remote-TGbot/notify.py Notification",
             "timeout": 10,
             "async": true
           }
@@ -152,83 +179,76 @@ pip install -r D:\Claude\claude-remote-bot\requirements.txt
 }
 ```
 
-`timeout: 360` для PreToolUse должен быть больше `APPROVAL_TIMEOUT` (300) с запасом на сеть. Для notify.py `async: true` — не блокировать Claude вообще.
+Важно:
+- `Stop` hook **НЕ** должен быть `async: true` — иначе Claude не дожидается `decision:block` и блокировка не сработает
+- `Notification` может быть `async: true` (это fire-and-forget уведомление)
+- `MCP_TOOL_TIMEOUT=3700000` (3700 сек) перекрывает дефолтный 60s от MCP client'а — иначе долгие `ask` упадут раньше времени
 
-В Claude Desktop settings.json подхватывается без перезапуска вкладки (по крайней мере для версии 2.1.121). Если изменения не подхватились — открыть `/hooks` или перезапустить вкладку.
+### 7. Скопировать slash-commands
 
-### 6. Проверить
-В Telegram: написать боту `/start` — должен ответить "Claude Remote Bot подключён".
+```bash
+mkdir -p ~/.claude/commands
+cp examples/commands/remotebotstart.md ~/.claude/commands/
+cp examples/commands/remotebotstop.md ~/.claude/commands/
+# отредактируй пути внутри них на свой каталог установки
+```
+
+### 8. Проверить
+
+В Telegram → написать боту `/start` → должен ответить «Claude Remote Bot подключён».
 
 ## Использование
 
-В Claude Code:
-- `/remotebotstart` — включить (запустит bot процесс + создаст state/active)
-- `/remotebotstop` — выключить (убьёт bot + удалит state/active)
+В Claude Code / Desktop:
+- `/remotebotstart` — поднять bot.py + создать `state/active`
+- `/remotebotstop` — убить bot + удалить `state/active`
 
 Когда включено:
-- **Tool requiring permission** → push с Allow/Deny. Не ответил за `APPROVAL_TIMEOUT` сек → автоматический deny.
-- **Claude закончил отвечать** (Stop) → push "готов ждать твой ввод" с превью последнего сообщения.
-- **Claude нужно внимание** (Notification) → push с текстом уведомления.
-- **Claude задаёт вопрос через `mcp__remote-bot__ask`** → push в ТГ с вопросом, ответь любым текстом → Claude получит и продолжит. Slash `/remotebotstart` инструктирует Claude использовать этот tool вместо обычного текстового вопроса.
 
-Auto-approved tools (через `permissions.allow` в settings.json) **не** триггерят push на approval. Это намеренно: смысл подтверждать удалённо то, на что и в Desktop-UI не было бы prompt'а.
-
-## Файловая структура
-
-```
-D:\Claude\claude-remote-bot\
-├── .env                      # секреты, gitignored
-├── .env.example
-├── .gitignore
-├── README.md
-├── requirements.txt
-├── bot.py                    # Telegram daemon: callback queries (Allow/Deny) + текстовые ответы
-├── hook.py                   # PreToolUse hook (двусторонний flow с Allow/Deny + фильтр permissions.allow)
-├── notify.py                 # Stop / Notification hook (fire-and-forget push)
-├── mcp_server.py             # MCP server: tool `ask` для Claude → Денис → Claude
-├── state/
-│   ├── active                # флаг — есть = бот пушит
-│   ├── bot.pid               # PID запущенного bot процесса
-│   ├── pending/              # (зарезервировано)
-│   ├── responses/<req_id>.json     # ответы Allow/Deny от bot.py для hook.py
-│   ├── pending_question/<req_id>.json  # активные вопросы от mcp_server.py
-│   └── answers/<req_id>.txt        # текстовые ответы от bot.py для mcp_server.py
-└── logs/
-    ├── bot.log               # лог daemon
-    ├── hook.log              # лог approval-запросов
-    ├── notify.log            # лог fire-and-forget уведомлений
-    └── mcp.log               # лог mcp_server (вопросы и ответы)
-```
-
-Конфиг MCP-сервера в `~/.claude/mcp.json`:
-```json
-{
-  "mcpServers": {
-    "remote-bot": {
-      "command": "python",
-      "args": ["D:\\Claude\\claude-remote-bot\\mcp_server.py"]
-    }
-  }
-}
-```
+| Событие | Поведение |
+|---|---|
+| Tool requiring permission | push в TG с Allow/Deny; не ответил за `APPROVAL_TIMEOUT`s → passthrough на Desktop UI |
+| Auto-approved tool (в `permissions.allow`) | проходит без push |
+| Claude закончил отвечать (Stop) | если в хвосте есть `?` → block + push «Stop hook сработал»; иначе тихое уведомление |
+| Claude вызывает `mcp__remote-bot__ask(...)` | push с force_reply → ответь любым текстом → Claude получит результат |
+| TG недоступен или бот не отвечает за 60s | passthrough — Desktop UI prompt появится локально |
 
 ## Безопасность
 
-- **Allowlist по chat_id** — bot отвечает только на сообщения с `TELEGRAM_CHAT_ID` из .env. Если кто-то узнает username бота — он не сможет отдавать команды.
-- **Безопасный default при сбое** — если ТГ недоступен или ответ не пришёл за timeout, hook возвращает `block`. Лучше блок ложно-позитивный, чем разрешить опасное действие.
-- **`.env` в .gitignore** — токен не попадает в git.
-- **Запросы видны только тебе** — bot не логирует payload в открытом виде, только tool_name и req_id в `logs/`.
+- **`.env` в .gitignore** — токен и chat_id не попадают в git
+- **Allowlist по chat_id** — bot.py обрабатывает только сообщения с `TELEGRAM_CHAT_ID`
+- **Защита settings.json** — Claude Desktop поверх hook approve **дополнительно** показывает свой prompt при редактировании файлов в `~/.claude/`. Это by-design защита от self-escalation: иначе hook мог бы дописать любые `allow:` patterns
+- **Логи без секретов** — в `logs/` пишется только `tool_name`, `req_id`, статус. Содержимое payload не утекает
 
 ## Известные ограничения
 
-- **Только Windows** (использует `pythonw`, `taskkill`, `Start-Process`).
-- **Сессия Claude Code должна быть запущена** на компе — это hook, не cloud-агент. Если ноут спит, ничего не работает.
-- **Hook вызывается на КАЖДОМ tool use** когда бот активен (включая Read/Glob/Grep). Это намеренно — так задумал Денис. Если станет шумно, можно ограничить через `matcher` в settings.json.
-- **Bot переживает перезапуск Claude Code сессии** — он отдельный процесс. Чтобы остановить — `/remotebotstop` или вручную `taskkill /PID <pid> /F`.
+- **Текущая реализация — Windows.** Использует `pythonw`, `tasklist`, `taskkill`. Адаптация под Linux/macOS требует замены на `nohup`/`pkill`/`ps`
+- **Hook вызывается на КАЖДЫЙ tool use** при активном боте (включая Read/Glob/Grep). Для большинства они auto-approved через `permissions.allow`, но скрипт всё равно запускается. Можно ограничить через `matcher` в settings.json
+- **Bot — отдельный процесс, переживает рестарт Claude.** Если рестартнул Claude Desktop без `/remotebotstop`, bot.py остаётся жить — но MCP-сессия пересоздаётся, и связка может временно поломаться. Делай чистый рестарт через `/remotebotstop` → рестарт → `/remotebotstart`
+- **Эвристика question detection — простая (по символу `?`)**. Вопросы без знака вопроса не ловятся (false negative). False positive (срабатывание на не-вопрос) маловероятен, но возможен на цитатах
+- **Один pending `ask` за раз.** Если Claude вызовет `ask` пока предыдущий ответ ещё не получен — второй вернёт ERROR
 
 ## Отладка
 
-- Логи: `D:\Claude\claude-remote-bot\logs\bot.log`, `logs\hook.log`
-- Состояние: в Telegram → `/status`
-- Если bot не отвечает на `/start` — проверь токен и что процесс запущен (`tasklist | findstr pythonw`)
-- Если hook вешает Claude Code — проверь что `APPROVAL_TIMEOUT` < hook `timeout` в settings.json и что bot процесс жив
+```bash
+# Состояние
+cat state/active && echo "active"
+cat state/bot.pid
+
+# Bot жив?
+tasklist //FI "PID eq $(cat state/bot.pid)"
+
+# Логи
+tail -f logs/bot.log     # daemon
+tail -f logs/hook.log    # PreToolUse approval requests
+tail -f logs/notify.log  # Stop / Notification
+tail -f logs/mcp.log     # MCP server (вопросы и ответы)
+
+# В Telegram
+/start    # подключение
+/status   # текущее состояние (АКТИВЕН/выключен) + PID
+```
+
+## Лицензия
+
+MIT
