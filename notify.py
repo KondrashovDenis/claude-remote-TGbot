@@ -1,20 +1,27 @@
 """
-Fire-and-forget уведомление в Telegram для Stop / Notification hooks.
+Fire-and-forget Telegram notifier for Stop / Notification hooks.
 
-Запускается как:
+Invoked as:
     python notify.py <event-name>
 
-Читает stdin (hook payload JSON) и шлёт в ТГ короткое уведомление БЕЗ inline-кнопок.
-Не ждёт ответа — это просто пуш на телефон.
+Reads the hook payload (JSON) from stdin and sends a short Telegram
+message WITHOUT inline buttons. Doesn't wait for a reply — it's just
+a phone push.
 
-В отличие от hook.py:
-- не блокирует Claude (выходит сразу после отправки)
-- не ждёт callback от пользователя
-- работает только если state/active существует (как и hook.py)
+Differences vs hook.py:
+- doesn't block Claude (exits right after sending)
+- doesn't wait for a user callback
+- only runs when state/active exists (same gate as hook.py)
 
-Используется для:
-- Stop event — Claude закончил отвечать, push "готов ждать ввод"
-- Notification event — Claude нужно внимание пользователя (вопрос/блокировка)
+Used for:
+- Stop event — Claude finished responding, push "ready for input"
+- Notification event — Claude needs the user's attention
+
+Special case: when the Stop event fires AND the tail of the last
+assistant message contains a question mark, the hook returns a
+{"decision": "block", "reason": ...} response so Claude is forced
+to re-issue the question through the mcp__remote-bot__ask tool
+instead of leaving it as plain text in the chat.
 """
 import os
 import re
@@ -23,7 +30,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-# UTF-8 на Windows-консоли (stdin тоже — payload может содержать кириллицу)
+# Force UTF-8 on stdin/stdout/stderr — payload may contain non-ASCII text
 try:
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
@@ -55,28 +62,28 @@ def log(msg: str):
 
 
 def silent_exit():
-    """Выход без вмешательства в работу Claude."""
+    """Exit without intervening in Claude's flow."""
     print(json.dumps({}), flush=True)
     sys.exit(0)
 
 
 def block_stop(reason: str):
-    """Заблокировать Stop event — Claude получит reason и продолжит turn."""
+    """Block the Stop event — Claude receives the reason and continues the turn."""
     print(json.dumps({"decision": "block", "reason": reason}), flush=True)
     sys.exit(0)
 
 
 def looks_like_question(text: str) -> bool:
     """
-    Эвристика: содержит ли хвост ответа вопрос к пользователю.
+    Heuristic: does the tail of the response contain a question to the user?
 
-    Только проверка наличия знака вопроса в последних 400 символах,
-    исключая содержимое fenced code-блоков и inline-кода (чтобы
-    знак вопроса внутри примера кода не триггерил false positive).
-    Маркеры типа "делать", "продолжить" и т.п. убраны — они слишком
-    часто встречаются в нарративе и дают ложные срабатывания.
-    Если автор формулирует вопрос без знака вопроса — это редкий
-    кейс, false negative окей.
+    Only checks for a question mark within the last 400 characters,
+    excluding fenced code blocks and inline code (so a `?` inside a
+    code example does not trigger a false positive). Marker words
+    like "делать"/"продолжить" were intentionally removed — they
+    occur in narrative far too often and produced false positives.
+    If the author phrases a question without a question mark, that's
+    a rare case where a false negative is acceptable.
     """
     if not text:
         return False
@@ -87,7 +94,7 @@ def looks_like_question(text: str) -> bool:
 
 
 def send_telegram_text(text: str):
-    """Отправка короткого уведомления в ТГ. Best-effort, ошибки молча."""
+    """Send a short Telegram notification. Best-effort, errors are swallowed."""
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -105,8 +112,8 @@ def send_telegram_text(text: str):
 
 def get_last_assistant_text(transcript_path_str: str) -> str:
     """
-    Прочитать JSONL transcript Claude Code и вернуть текст последнего
-    assistant-сообщения. Возвращает пустую строку если ничего не нашли.
+    Parse Claude Code's JSONL transcript and return the text of the
+    last assistant message. Returns an empty string if nothing matched.
     """
     if not transcript_path_str:
         return ""
@@ -126,10 +133,10 @@ def get_last_assistant_text(transcript_path_str: str) -> str:
                 except Exception:
                     continue
 
-                # Поддержка нескольких возможных форматов:
+                # Several possible shapes are supported:
                 # 1) {"type": "assistant", "message": {"content": [...]}}
                 # 2) {"role": "assistant", "content": [...] | "..."}
-                # 3) внутри message.content — list текстовых блоков {"type":"text","text":"..."}
+                # 3) message.content is a list of blocks {"type":"text","text":"..."}
 
                 role = obj.get("role") or (obj.get("type") if obj.get("type") in ("assistant", "user") else None)
                 if role != "assistant":
@@ -163,17 +170,17 @@ def get_last_assistant_text(transcript_path_str: str) -> str:
 
 
 def format_message(event: str, payload: dict) -> str:
-    """Собрать текст уведомления."""
+    """Build the notification text."""
     if event == "Stop":
-        # Читаем последнее assistant-сообщение из transcript JSONL
+        # Read the last assistant message from the transcript JSONL
         transcript_path = payload.get("transcript_path", "")
         last = get_last_assistant_text(transcript_path)
 
-        text = "<b>Claude закончил отвечать</b>\n\nГотов ждать твой ввод."
+        text = "<b>Claude finished responding</b>\n\nReady for your input."
         if last:
-            # Telegram лимит на сообщение - 4096 символов. Оставляем запас на
-            # заголовок (~50 chars) и на расширение HTML-escape (& → &amp; и т.п.).
-            # 3500 даёт безопасный запас в большинстве случаев.
+            # Telegram message limit is 4096 chars. Keep some headroom for
+            # the title (~50 chars) and HTML-escape expansion (& → &amp;).
+            # 3500 is a safe ceiling in practice.
             preview_len = 3500
             preview = last[:preview_len].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             suffix = "..." if len(last) > preview_len else ""
@@ -181,19 +188,19 @@ def format_message(event: str, payload: dict) -> str:
         return text
 
     if event == "Notification":
-        # Claude нужно внимание пользователя
+        # Claude needs the user's attention
         msg = payload.get("message", "Claude requires attention")
         msg_esc = str(msg)[:400].replace("<", "&lt;").replace(">", "&gt;")
-        return f"<b>Claude требует внимания</b>\n\n{msg_esc}"
+        return f"<b>Claude needs attention</b>\n\n{msg_esc}"
 
-    # Дефолт
+    # Default
     return f"<b>{event}</b>\n\n<pre>{json.dumps(payload, ensure_ascii=False)[:300]}</pre>"
 
 
 def main():
     event = sys.argv[1] if len(sys.argv) > 1 else "Unknown"
 
-    # Парсинг stdin
+    # Parse stdin
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
@@ -201,7 +208,7 @@ def main():
         log(f"[{event}] failed to parse stdin: {e}")
         silent_exit()
 
-    # Bot не активен - молчим
+    # Bot off — silent
     if not (STATE / "active").exists():
         silent_exit()
 
@@ -209,9 +216,9 @@ def main():
         log(f"[{event}] WARN: .env missing TOKEN/CHAT_ID")
         silent_exit()
 
-    # Stop event + вопрос в конце ответа → блокируем, чтобы Claude перевызвал
-    # через mcp__remote-bot__ask. Защита от цикла: stop_hook_active=True
-    # значит блокировка уже была — больше не блокируем.
+    # Stop event + question at the end of the answer → block so Claude
+    # re-issues via mcp__remote-bot__ask. Loop guard: stop_hook_active=True
+    # means we already blocked once — don't block again.
     if event == "Stop":
         already_blocked = bool(payload.get("stop_hook_active", False))
         if not already_blocked:
@@ -220,9 +227,9 @@ def main():
             if looks_like_question(last_text):
                 log("[Stop] question detected, blocking to force ask tool")
                 send_telegram_text(
-                    "⚠ <b>Stop hook сработал</b>\n\n"
-                    "Claude задал вопрос текстом, не вызвав <code>ask</code>. "
-                    "Заставляю перевызвать через инструмент."
+                    "⚠ <b>Stop hook fired</b>\n\n"
+                    "Claude asked a question as plain text without calling "
+                    "<code>ask</code>. Forcing it to re-issue via the tool."
                 )
                 block_stop(
                     "Remote Bot is active — the user is not at the keyboard. "

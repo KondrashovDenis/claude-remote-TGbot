@@ -1,17 +1,17 @@
 ---
-description: Остановить Claude Remote Bot — вернуться к локальным подтверждениям в Claude Desktop / Code
+description: Stop Claude Remote Bot — return to local approvals in Claude Desktop / Code
 allowed-tools: Bash, Read
 ---
 
-Останови Claude Remote Bot **одной Bash-командой** без `cd` (абсолютные пути,
-чтобы избежать Desktop-UI защиты от untrusted git hooks):
+Stop Claude Remote Bot as **a single Bash command** without `cd`
+(absolute paths to avoid the Desktop-UI guard against untrusted git hooks):
 
 ```bash
-# Замени BOT_HOME на абсолютный путь к каталогу установки
+# Replace BOT_HOME with the absolute path to your install directory.
 BOT_HOME=/path/to/claude-remote-TGbot
 
-# 1. Удалить флаг — сразу passthrough даже если bot ещё жив
-[ -f "$BOT_HOME/state/active" ] && rm -f "$BOT_HOME/state/active" && echo "[1] state/active удалён" || echo "[1] state/active отсутствует"
+# 1. Drop the flag — passthrough mode kicks in immediately even if the bot is still alive
+[ -f "$BOT_HOME/state/active" ] && rm -f "$BOT_HOME/state/active" && echo "[1] state/active removed" || echo "[1] state/active already gone"
 
 # 2-3. PID + kill
 if [ -f "$BOT_HOME/state/bot.pid" ]; then
@@ -20,19 +20,20 @@ if [ -f "$BOT_HOME/state/bot.pid" ]; then
     echo "[2-3] killed PID $PID"
   else
     if tasklist //FI "PID eq $PID" //NH 2>/dev/null | grep -q "$PID"; then
-      echo "[2-3] FAIL процесс не убит (нужны права?)"; exit 1
+      echo "[2-3] FAIL — process not killed (insufficient rights?)"; exit 1
     fi
-    echo "[2-3] PID $PID уже мёртв"
+    echo "[2-3] PID $PID was already dead"
   fi
   rm -f "$BOT_HOME/state/bot.pid"
-  echo "[4] bot.pid удалён"
+  echo "[4] bot.pid removed"
   echo
-  echo "Remote Bot остановлен (PID был: $PID). Подтверждения снова обрабатываются локально в Claude Desktop / Code."
+  echo "Remote Bot stopped (was PID: $PID). Approvals are handled locally in Claude Desktop / Code again."
 else
-  echo "Bot уже остановлен"
+  echo "Bot already stopped"
 fi
 ```
 
-Если `taskkill` упал не из-за "процесса нет, но процесс жив" — попроси пользователя убить вручную через Диспетчер задач.
+If `taskkill` fails for a reason other than "process is gone but reported alive" — ask the user to kill it via Task Manager.
 
-После остановки `state/active` удалён, последующие tool calls пройдут обычным flow через Desktop UI prompt.
+After stop, `state/active` is gone, and subsequent tool calls flow
+through to the regular Desktop UI prompt.

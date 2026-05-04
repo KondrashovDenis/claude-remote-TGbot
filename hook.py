@@ -1,25 +1,28 @@
 """
-PreToolUse hook для Claude Code.
+PreToolUse hook for Claude Code / Desktop.
 
-Запускается перед КАЖДЫМ tool use. Hook сам проверяет, покрыт ли вызов
-permissions.allow из ~/.claude/settings.json. Если да — passthrough (без push).
-Если нет — отправляет в Telegram inline-кнопки и ждёт ответа.
+Runs before EVERY tool use. The hook itself checks whether the call is
+covered by permissions.allow in ~/.claude/settings.json. If yes —
+passthrough (no push). If not — pushes inline Allow/Deny buttons to
+Telegram and waits for the answer.
 
-Это сделано вместо event PermissionRequest, потому что в Claude Desktop
-PermissionRequest hook не закрывает встроенный UI prompt — пользователю
-пришлось бы отвечать дважды (в ТГ и в Desktop UI). PreToolUse перехватывает
-до отрисовки UI prompt'а, поэтому в Desktop UI prompt не появляется.
+Implemented as PreToolUse rather than PermissionRequest because in
+Claude Desktop a PermissionRequest hook does not dismiss the built-in
+UI prompt — the user would have to answer twice (in TG and in Desktop
+UI). PreToolUse intercepts before the UI prompt is rendered, so the
+Desktop UI prompt does not appear.
 
-Читает payload из stdin (JSON). Если state/active существует и tool НЕ
-auto-approved — шлёт запрос в Telegram и ждёт ответа от bot.py.
+Reads the payload from stdin (JSON). If state/active exists and the
+tool is NOT auto-approved — sends an approval request to Telegram and
+waits for a response from bot.py.
 
-Stdout output (JSON, формат для PreToolUse):
-  {} — passthrough (Claude обработает permission обычным flow)
+Stdout output (JSON, the PreToolUse format):
+  {} — passthrough (Claude handles permission via the regular flow)
   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                          "permissionDecision": "allow"}} — одобрено
+                          "permissionDecision": "allow"}} — approved
   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                           "permissionDecision": "deny",
-                          "permissionDecisionReason": "..."}} — отклонено
+                          "permissionDecisionReason": "..."}} — denied
 """
 import os
 import sys
@@ -30,8 +33,9 @@ import fnmatch
 from pathlib import Path
 from datetime import datetime
 
-# Принудительно UTF-8 на stdin/stdout/stderr — иначе кириллица в payload
-# (description у Bash и т.п.) приходит/уходит в Windows-кодировке (cp866/cp1251)
+# Force UTF-8 on stdin/stdout/stderr — otherwise non-ASCII chars in the
+# payload (e.g. Bash description) get mangled by the Windows OEM codepage
+# (cp866/cp1251).
 try:
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
@@ -66,18 +70,18 @@ def log(msg: str):
 
 
 def respond(payload: dict, exit_code: int = 0):
-    """Вывести JSON в stdout и выйти."""
+    """Print JSON to stdout and exit."""
     print(json.dumps(payload, ensure_ascii=False))
     sys.exit(exit_code)
 
 
 def passthrough():
-    """Не вмешиваемся — пусть Claude Code обработает permission обычным образом."""
+    """Don't intervene — let Claude Code handle the permission normally."""
     respond({})
 
 
 def approve():
-    """Разрешить tool call. Формат hookSpecificOutput для PreToolUse."""
+    """Allow the tool call. PreToolUse hookSpecificOutput format."""
     respond({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -87,7 +91,7 @@ def approve():
 
 
 def block(reason: str):
-    """Заблокировать tool call с причиной. Формат hookSpecificOutput для PreToolUse."""
+    """Deny the tool call with a reason. PreToolUse hookSpecificOutput format."""
     respond({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -97,11 +101,8 @@ def block(reason: str):
     })
 
 
-# Кеш загруженного списка allow-патернов чтобы не читать settings.json
-# на каждый hook invocation (но hook это отдельный процесс, кеш живёт только
-# в рамках одного вызова — оставлено для будущей оптимизации).
 def load_allow_patterns():
-    """Прочитать permissions.allow из ~/.claude/settings.json."""
+    """Read permissions.allow from ~/.claude/settings.json."""
     settings_path = Path.home() / ".claude" / "settings.json"
     try:
         with settings_path.open(encoding="utf-8") as f:
@@ -114,22 +115,22 @@ def load_allow_patterns():
 
 def is_auto_approved(tool_name: str, tool_input: dict, allow_patterns: list) -> bool:
     """
-    Проверяет, покрыт ли tool call правилом из permissions.allow.
+    Check whether the tool call is covered by a permissions.allow rule.
 
-    Поддерживает:
-    - "ToolName" — matches все вызовы этого tool
-    - "ToolName(args)" с literal args — exact match
-    - "ToolName(prefix:*)" — startswith prefix
+    Supported pattern shapes:
+    - "ToolName"            — matches every call to that tool
+    - "ToolName(literal)"   — exact match of the relevant argument
+    - "ToolName(prefix:*)"  — startswith prefix
     - "ToolName(*pattern*)" — fnmatch glob
     """
     for pattern in allow_patterns:
         if "(" not in pattern:
-            # Tool name only — все вызовы
+            # Plain tool name — every call
             if pattern.strip() == tool_name:
                 return True
             continue
 
-        # Парсим "ToolName(args)"
+        # Parse "ToolName(args)"
         try:
             tool_part, args_part = pattern.split("(", 1)
             args_part = args_part.rstrip(")")
@@ -139,7 +140,7 @@ def is_auto_approved(tool_name: str, tool_input: dict, allow_patterns: list) -> 
         if tool_part.strip() != tool_name:
             continue
 
-        # Достаём релевантный аргумент из tool_input
+        # Pull the relevant argument from tool_input
         if tool_name == "Bash":
             value = str(tool_input.get("command", ""))
         elif tool_name in ("Read", "Write", "Edit", "MultiEdit"):
@@ -151,18 +152,18 @@ def is_auto_approved(tool_name: str, tool_input: dict, allow_patterns: list) -> 
         else:
             value = json.dumps(tool_input, ensure_ascii=False)
 
-        # Спец-синтаксис ":*" в конце паттерна = startswith
+        # Special syntax ":*" at the end of the pattern = startswith
         if args_part.endswith(":*"):
             prefix = args_part[:-2]
             if value.startswith(prefix):
                 return True
             continue
 
-        # Иначе — fnmatch (поддержит *, ?, [...])
+        # Otherwise — fnmatch (supports *, ?, [...])
         if fnmatch.fnmatch(value, args_part):
             return True
 
-        # Точное совпадение (escape sequences и exact strings)
+        # Exact match (for escape sequences or literal strings)
         if value == args_part:
             return True
 
@@ -170,7 +171,7 @@ def is_auto_approved(tool_name: str, tool_input: dict, allow_patterns: list) -> 
 
 
 def format_summary(payload: dict) -> str:
-    """Краткое HTML-описание tool use для Telegram."""
+    """Short HTML summary of the tool use for Telegram."""
     tool = payload.get("tool_name", "?")
     inp = payload.get("tool_input", {}) or {}
 
@@ -199,13 +200,13 @@ def format_summary(payload: dict) -> str:
         pattern = esc(inp.get("pattern", "?"))
         return f"<b>{tool}</b>: <code>{pattern}</code>"
 
-    # Дефолт - JSON tool_input в обрезанном виде
+    # Default — truncated tool_input as JSON
     inp_str = esc(json.dumps(inp, ensure_ascii=False)[:400])
     return f"<b>{tool}</b>\n<pre>{inp_str}</pre>"
 
 
 def main():
-    # Парсинг stdin
+    # Parse stdin
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
@@ -213,11 +214,11 @@ def main():
         log(f"failed to parse stdin: {e}")
         passthrough()
 
-    # Bot не активен - passthrough (быстрый путь)
+    # Bot is off — passthrough (fast path)
     if not (STATE / "active").exists():
         passthrough()
 
-    # Валидация конфига
+    # Config sanity check
     if not TOKEN or not CHAT_ID:
         log("WARN: bot active but .env missing TOKEN/CHAT_ID, passthrough")
         passthrough()
@@ -225,8 +226,9 @@ def main():
     tool_name = payload.get("tool_name", "?")
     tool_input = payload.get("tool_input", {}) or {}
 
-    # Если tool уже покрыт permissions.allow - passthrough без push
-    # (Claude обработает permission обычным flow, в Desktop UI prompt не появится)
+    # If the tool is already covered by permissions.allow — passthrough
+    # without push. Claude Code will handle the permission via the regular
+    # flow; the Desktop UI prompt will not appear.
     allow_patterns = load_allow_patterns()
     if is_auto_approved(tool_name, tool_input, allow_patterns):
         log(f"auto-approved: {tool_name}")
@@ -237,7 +239,7 @@ def main():
 
     log(f"[{req_id}] sending: {tool_name}")
 
-    # Отправка в ТГ
+    # Send to Telegram
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -256,11 +258,11 @@ def main():
         )
         r.raise_for_status()
     except Exception as e:
-        # ТГ недоступен → graceful degradation на Desktop UI prompt.
+        # TG unreachable → graceful degradation onto the Desktop UI prompt.
         log(f"[{req_id}] send failed: {e} — passthrough to Desktop UI")
         passthrough()
 
-    # Ждём ответа (polling файла)
+    # Wait for the answer (file polling)
     response_file = RESPONSES / f"{req_id}.json"
     deadline = time.time() + TIMEOUT
 
@@ -274,17 +276,18 @@ def main():
                 if decision == "approve":
                     approve()
                 else:
-                    block("Денис отказал через Telegram")
+                    block("Denied via Telegram")
             except Exception as e:
                 log(f"[{req_id}] response parse failed: {e}")
-                block(f"Ошибка чтения ответа: {e}")
+                block(f"Failed to read response: {e}")
         time.sleep(0.5)
 
-    # Таймаут — graceful degradation: passthrough вместо блокировки. Тогда
-    # Claude Desktop отрисует свой permission prompt и пользователь сможет
-    # ответить локально. Это страхует от ситуации, когда ТГ-bot завис, не
-    # доставил callback или Денис не у телефона. Лучше двойной prompt
-    # (если потом и в ТГ нажмёт), чем глухой блок.
+    # Timeout — graceful degradation: passthrough rather than block. Then
+    # Claude Desktop will render its own permission prompt and the user
+    # can answer locally. This covers cases where the TG bot stalled, the
+    # callback didn't arrive, or the user is away from the phone. A double
+    # prompt (if the user later taps Allow in TG too) is better than a
+    # silent block.
     log(f"[{req_id}] timeout {TIMEOUT}s — passthrough to Desktop UI")
     passthrough()
 

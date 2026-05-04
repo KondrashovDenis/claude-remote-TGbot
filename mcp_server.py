@@ -1,23 +1,23 @@
 """
-MCP server для Claude Remote Bot — tool `ask` для двустороннего диалога с
-Денисом через Telegram, когда он не за компом.
+MCP server for Claude Remote Bot — exposes the `ask` tool for two-way
+chat with the user via Telegram, when they're away from the computer.
 
 Tool: ask(question: str, timeout_seconds: int = 600) -> str
-- Если Remote Bot активен (state/active существует) — отправляет вопрос
-  в Telegram и ждёт текстового ответа
-- Если bot не активен — возвращает error (Claude должен fallback на
-  обычный текстовый вопрос)
+- If Remote Bot is active (state/active exists) — sends the question
+  to Telegram and waits for a text reply
+- If the bot is off — returns an ERROR string (Claude should fall
+  back to asking the question as plain text in chat)
 
-Архитектура:
+Architecture:
     Claude → ask() tool → Telegram API (sendMessage)
-                       → state/pending_question/<req_id>.json (запись)
-                       → polling state/answers/<req_id>.txt
-                       ← возврат текста ответа
+                       → state/pending_question/<req_id>.json (write)
+                       → poll state/answers/<req_id>.txt
+                       ← return the answer text
 
-    bot.py отдельно обрабатывает текстовые сообщения от ALLOWED_CHAT_ID:
-        получил текст → есть pending question? → пишет в state/answers/
+    bot.py separately handles plain-text messages from ALLOWED_CHAT_ID:
+        text received → is there a pending question? → write to state/answers/
 
-Запускается harness'ом Claude Code (через ~/.claude/mcp.json) на каждый старт сессии.
+Started by Claude Code's MCP harness (~/.claude/mcp.json) at session start.
 """
 import os
 import sys
@@ -68,54 +68,55 @@ mcp = FastMCP("remote-bot")
 @mcp.tool()
 def ask(question: str, timeout_seconds: int = 600) -> str:
     """
-    Задать Денису вопрос через Telegram и дождаться текстового ответа.
+    Ask the user a question via Telegram and wait for a text reply.
 
-    Используй ВМЕСТО обычного текстового вопроса в чате когда Remote Bot
-    активен (то есть Денис куда-то ушёл от компа). Это позволяет получить
-    ответ из Telegram и продолжить работу в той же сессии.
+    Use INSTEAD of asking a plain-text question in chat when Remote
+    Bot is active (i.e. the user has stepped away from the computer).
+    This delivers the answer back from Telegram so the session can
+    continue without interruption.
 
     Args:
-        question: Текст вопроса. Будет показан в Telegram. Поддерживает
-            многострочные сообщения; HTML-теги будут заэскейплены.
-        timeout_seconds: Сколько ждать ответа в секундах. По умолчанию 600
-            (10 минут). Максимум 3600 (1 час).
+        question: The question text. Shown in Telegram. Multi-line
+            messages are supported; HTML tags are escaped.
+        timeout_seconds: How long to wait for a reply, in seconds.
+            Default 600 (10 minutes). Maximum 3600 (1 hour).
 
     Returns:
-        Текст ответа Дениса.
+        The user's reply text.
 
     Raises:
-        Возвращает строку с префиксом "ERROR:" если:
-        - Remote Bot не активен (нет state/active)
-        - В .env не настроены TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID
-        - Уже есть pending question (нужно дождаться предыдущего ответа)
-        - Таймаут истёк
-        - Сетевая ошибка при отправке в Telegram
+        Returns a string prefixed with "ERROR:" if:
+        - Remote Bot is not active (no state/active)
+        - .env is missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID
+        - Another pending question is already in flight
+        - The timeout expired
+        - A network error occurred while sending to Telegram
     """
-    # Fail-safe: если bot не активен - не отправляем
+    # Fail-safe: don't send anything if the bot is off
     if not (STATE / "active").exists():
         log("ask called but bot not active")
         return (
-            "ERROR: Remote Bot не активен (state/active отсутствует). "
-            "Задай вопрос Денису обычным текстом в чате."
+            "ERROR: Remote Bot is not active (state/active is missing). "
+            "Ask the user as plain text in the chat instead."
         )
 
     if not TOKEN or not CHAT_ID:
         log("ask called but .env missing TOKEN/CHAT_ID")
-        return "ERROR: TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы в .env"
+        return "ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set in .env"
 
-    # Только один pending question за раз
+    # Only one pending question at a time
     existing = list(PENDING.glob("*.json"))
     if existing:
         log(f"ask refused — already pending: {existing[0].name}")
         return (
-            "ERROR: Уже есть неотвеченный вопрос Денису. "
-            "Дождись ответа на предыдущий вопрос или попроси Дениса в Desktop ответить."
+            "ERROR: There's already an unanswered question in flight. "
+            "Wait for the previous answer or ask the user to reply in Desktop."
         )
 
     timeout_seconds = max(10, min(int(timeout_seconds), 3600))
     req_id = uuid.uuid4().hex[:8]
 
-    # Записываем pending question (для bot.py — он связывает с ответом)
+    # Record the pending question (bot.py uses this to pair the reply)
     pending_file = PENDING / f"{req_id}.json"
     pending_file.write_text(
         json.dumps({
@@ -127,11 +128,14 @@ def ask(question: str, timeout_seconds: int = 600) -> str:
     )
     log(f"[{req_id}] pending created")
 
-    # HTML escape вопроса
+    # HTML-escape the question
     q_html = question.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    # Отправка в ТГ — без inline-кнопок, force_reply чтобы клиент подсветил
-    text = f"<b>Claude спрашивает</b> [<code>{req_id}</code>]\n\n{q_html}\n\n<i>Ответь любым текстом — Claude получит и продолжит.</i>"
+    # Send to TG — no inline buttons; force_reply nudges the client to focus
+    text = (
+        f"<b>Claude is asking</b> [<code>{req_id}</code>]\n\n{q_html}\n\n"
+        f"<i>Reply with any text — Claude will receive it and continue.</i>"
+    )
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -150,11 +154,11 @@ def ask(question: str, timeout_seconds: int = 600) -> str:
             pending_file.unlink()
         except Exception:
             pass
-        return f"ERROR: Не удалось отправить вопрос в Telegram: {e}"
+        return f"ERROR: Failed to send the question to Telegram: {e}"
 
     log(f"[{req_id}] sent to TG, waiting up to {timeout_seconds}s")
 
-    # Polling state/answers/<req_id>.txt
+    # Poll state/answers/<req_id>.txt
     answer_file = ANSWERS / f"{req_id}.txt"
     deadline = time.time() + timeout_seconds
 
@@ -163,23 +167,27 @@ def ask(question: str, timeout_seconds: int = 600) -> str:
             try:
                 answer = answer_file.read_text(encoding="utf-8").strip()
                 answer_file.unlink()
-                # pending уже должен быть удалён bot.py, но на всякий
+                # The pending should already be gone (cleaned by bot.py),
+                # but remove it just in case.
                 if pending_file.exists():
                     pending_file.unlink()
                 log(f"[{req_id}] got answer ({len(answer)} chars)")
                 return answer
             except Exception as e:
                 log(f"[{req_id}] answer read failed: {e}")
-                return f"ERROR: Не удалось прочитать ответ: {e}"
+                return f"ERROR: Failed to read the answer: {e}"
         time.sleep(0.5)
 
-    # Timeout — чистим pending
+    # Timeout — clean up the pending file
     log(f"[{req_id}] timeout {timeout_seconds}s")
     try:
         pending_file.unlink()
     except Exception:
         pass
-    return f"ERROR: Денис не ответил за {timeout_seconds} секунд. Задай вопрос обычным текстом в чате."
+    return (
+        f"ERROR: No reply within {timeout_seconds}s. "
+        f"Ask the question as plain text in the chat instead."
+    )
 
 
 if __name__ == "__main__":

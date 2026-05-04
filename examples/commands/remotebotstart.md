@@ -1,74 +1,87 @@
 ---
-description: Запустить Claude Remote Bot — пушить tool-запросы (требующие подтверждения) в Telegram для удалённого approve/deny с телефона
+description: Start Claude Remote Bot — push tool requests that need approval to Telegram so they can be approved/denied from the phone
 allowed-tools: Bash, Read
 ---
 
-Запусти Claude Remote Bot для удалённого подтверждения действий через Telegram.
+Start Claude Remote Bot for remote tool-call approval via Telegram.
 
-Делай **одной Bash-командой** без `cd` (абсолютные пути нужны чтобы избежать
-Desktop-UI защиты от untrusted git hooks — она срабатывает на любую команду
-вида `cd ...; git ...`):
+Run this as **a single Bash command** without `cd` (absolute paths
+matter — they avoid the Desktop-UI guard against untrusted git hooks
+that triggers on any `cd ...; X` command):
 
 ```bash
-# Замени BOT_HOME на абсолютный путь к каталогу установки. Если bash
-# не поддерживает heredoc-переменные в проде — раскрой вручную:
+# Replace BOT_HOME with the absolute path to your install directory.
 BOT_HOME=/path/to/claude-remote-TGbot
 
-# 1. Проверка конфига
-test -f "$BOT_HOME/.env" || { echo "FAIL: создай .env из .env.example"; exit 1; }
+# 1. Config check
+test -f "$BOT_HOME/.env" || { echo "FAIL: create .env from .env.example"; exit 1; }
 
-# 2. Проверка зависимостей
-python -c "import telegram, dotenv, requests" 2>&1 || { echo "deps missing, ставлю..."; pip install -q -r "$BOT_HOME/requirements.txt"; }
+# 2. Dependency check
+python -c "import telegram, dotenv, requests" 2>&1 || { echo "deps missing, installing..."; pip install -q -r "$BOT_HOME/requirements.txt"; }
 
-# 3. Проверка что бот не запущен
+# 3. Already running?
 if [ -f "$BOT_HOME/state/bot.pid" ]; then
   PID=$(cat "$BOT_HOME/state/bot.pid")
   if tasklist //FI "PID eq $PID" //NH 2>/dev/null | grep -q "$PID"; then
     [ ! -f "$BOT_HOME/state/active" ] && touch "$BOT_HOME/state/active"
-    echo "Bot уже запущен (PID: $PID)"; exit 0
+    echo "Bot already running (PID: $PID)"; exit 0
   fi
   rm -f "$BOT_HOME/state/bot.pid"
 fi
 
-# 4-5. Запуск + флаг
+# 4-5. Launch + flag
 pythonw "$BOT_HOME/bot.py" &
 touch "$BOT_HOME/state/active"
 sleep 3
 
-# 6-7. Проверка
+# 6-7. Verify
 if [ -f "$BOT_HOME/state/bot.pid" ] && tasklist //FI "PID eq $(cat $BOT_HOME/state/bot.pid)" //NH 2>/dev/null | grep -q "$(cat $BOT_HOME/state/bot.pid)"; then
-  echo "Remote Bot запущен (PID: $(cat $BOT_HOME/state/bot.pid)). Tool-запросы вне permissions.allow пушатся в Telegram до /remotebotstop."
-  echo "Лог: $BOT_HOME/logs/bot.log"
+  echo "Remote Bot started (PID: $(cat $BOT_HOME/state/bot.pid)). Tool requests outside permissions.allow will be pushed to Telegram until /remotebotstop."
+  echo "Log: $BOT_HOME/logs/bot.log"
 else
-  echo "FAIL: bot не стартанул. Лог:"
+  echo "FAIL: bot did not start. Log:"
   tail -20 "$BOT_HOME/logs/bot.log" 2>/dev/null
 fi
 ```
 
-После запуска: проверь в Telegram бот ответ на `/start` или `/status` — должен показать "АКТИВЕН".
+After start: send `/start` or `/status` to the bot in Telegram — it should reply with "ACTIVE".
 
-**Важно:** push в TG приходит **только** на tool calls которые НЕ покрыты `permissions.allow` в `~/.claude/settings.json`. Auto-approved tools (Bash из allow-list, MCP tools и т.п.) проходят обычным flow без push.
+**Important:** TG pushes happen **only** for tool calls that are NOT
+covered by `permissions.allow` in `~/.claude/settings.json`.
+Auto-approved tools (Bash entries in the allow list, MCP tools, etc.)
+flow through without a push.
 
-Если на любом шаге ошибка — покажи её, не делай вид что всё ок.
+If anything fails on any step, surface the error — don't pretend it succeeded.
 
 ---
 
-## КРИТИЧНО для Claude — пока bot активен
+## CRITICAL for Claude — while the bot is active
 
-После успешного запуска ты должен **в этой сессии и до /remotebotstop** соблюдать одно правило:
+After a successful start you must obey **one rule** for the rest of the
+session, until `/remotebotstop`:
 
-**Когда тебе нужно задать пользователю вопрос или попросить решение** (выбор между вариантами, уточнение параметра, "как назвать", "продолжить ли" и т.п.) — **ВСЕГДА используй tool `mcp__remote-bot__ask`** ВМЕСТО обычного текстового вопроса в чате.
+**Whenever you need to ask the user a question or request a decision**
+(picking between options, clarifying a parameter, "what should we name it",
+"should we proceed", and so on) — **ALWAYS use the
+`mcp__remote-bot__ask` tool** INSTEAD of asking as plain text in chat.
 
 ```
-mcp__remote-bot__ask(question="Какое имя файла выбрать — A или B?", timeout_seconds=600)
+mcp__remote-bot__ask(question="Which filename — A or B?", timeout_seconds=600)
 ```
 
-Tool вернёт:
-- **Текст ответа пользователя** → ты получаешь как результат и продолжаешь работать
-- **"ERROR: ..."** → fallback на обычный текстовый вопрос в чате
+The tool returns:
+- **The user's reply text** — you receive it as the tool result and continue working
+- **"ERROR: ..."** — fall back to a regular text question in chat
 
-После `/remotebotstop` tool автоматически возвращает ERROR (state/active удалён) — переключение обратно на обычный flow самопроизвольное.
+After `/remotebotstop` the tool automatically returns ERROR (state/active
+is removed) — the switch back to the normal flow is automatic.
 
-Это нужно потому что пользователь может быть не за компом — обычный текстовый вопрос ему не виден. MCP-tool пушит вопрос в Telegram, пользователь отвечает из TG, Claude получает ответ и продолжает сессию без перерыва.
+This matters because the user may not be at the computer — a plain-text
+chat question would be invisible to them. The MCP tool delivers the
+question as a Telegram push, the user replies from TG, you get the
+answer and continue the session uninterrupted.
 
-Дополнительная подстраховка — Stop hook (`notify.py`) детектит знак вопроса в хвосте ответа Claude и при активном боте возвращает `decision: block`, заставляя Claude перевызвать через `ask`. Но опираться на это не стоит — следуй правилу сам.
+There is also a backstop — the Stop hook (`notify.py`) detects a question
+mark in the tail of your reply and, while the bot is active, returns
+`decision: block` to force you to re-issue via `ask`. Don't rely on it
+though — follow the rule yourself.

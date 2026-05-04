@@ -1,11 +1,14 @@
 """
-Tests for notify.py — focus on the pure helpers that have no side effects:
-- looks_like_question: heuristic for detecting a question in Claude's tail
-- get_last_assistant_text: parses a transcript JSONL produced by Claude Code
+Tests for notify.py — focused on the pure helpers that have no side
+effects:
+- looks_like_question: heuristic that detects a question in Claude's
+  response tail
+- get_last_assistant_text: parses a JSONL transcript produced by
+  Claude Code
 
-The notify.py module has import-time side effects (mkdir, load_dotenv), but
-those are harmless on a CI runner — the file just creates an empty logs/
-directory and silently no-ops on the missing .env.
+The notify.py module has import-time side effects (mkdir, load_dotenv),
+but they are harmless on a CI runner — the file simply creates an empty
+logs/ directory and silently no-ops on a missing .env.
 """
 import json
 import sys
@@ -30,55 +33,58 @@ class TestLooksLikeQuestion:
         assert looks_like_question(None) is False
 
     def test_plain_statement_no_question_mark(self):
-        assert looks_like_question("Готово, всё запушено.") is False
+        assert looks_like_question("Done. Everything pushed.") is False
 
     def test_trailing_question_mark(self):
-        assert looks_like_question("Делать дальше?") is True
+        assert looks_like_question("Should we keep going?") is True
 
     def test_question_mid_tail(self):
         # Question mark not at the very end but inside the last 400 chars
-        text = "Я подумал и решил вот что: какой вариант возьмём? Готов ждать ответа."
+        text = (
+            "I thought about it and decided as follows: "
+            "which option do we pick? Standing by for an answer."
+        )
         assert looks_like_question(text) is True
 
     def test_question_outside_400_char_window(self):
         # 500 chars of plain prose where the only "?" is at position 0
-        prefix = "Это вопрос? "
-        body = "А дальше длинный нарратив без знаков. " * 30
+        prefix = "Is this a question? "
+        body = "And then a long narrative without any marks. " * 30
         assert len(prefix + body) > 400
         assert looks_like_question(prefix + body) is False
 
     def test_fenced_code_block_question_ignored(self):
-        text = "Готово.\n```python\nif x?:\n    pass\n```\n"
+        text = "Done.\n```python\nif x?:\n    pass\n```\n"
         assert looks_like_question(text) is False
 
     def test_inline_code_question_ignored(self):
-        text = "Использую `x?y:z` тернарник, всё ок."
+        text = "Using a `x?y:z` ternary, all good."
         assert looks_like_question(text) is False
 
     def test_question_outside_code_still_caught(self):
-        text = "```python\nif x?:\n    pass\n```\nКакой выбираем?"
+        text = "```python\nif x?:\n    pass\n```\nWhich one do we pick?"
         assert looks_like_question(text) is True
 
     def test_no_false_positive_on_old_marker_word(self):
-        # Earlier heuristic (now removed) triggered on words like "продолжить"
-        # in narrative — make sure we no longer regress.
+        # An earlier (now-removed) heuristic triggered on words like
+        # "продолжить" inside narrative — make sure we don't regress.
         text = (
-            "Поправил async + добавил flush. Скорее всего settings.json "
-            "кешируется на сессию, поэтому в этом чате блокировка может всё "
-            "ещё не сработать. Закрой Claude Desktop полностью и открой "
-            "снова — этот чат останется в истории, можно продолжить с того "
-            "же места."
+            "Fixed async + added flush. The settings.json is most "
+            "likely cached for the session, so in this chat the block "
+            "may still not fire. Close Claude Desktop completely and "
+            "reopen — this chat will remain in history, you can resume "
+            "right where you left off."
         )
         assert looks_like_question(text) is False
 
     def test_multiple_questions_returns_true(self):
-        text = "Делать? Или подождать?"
+        text = "Should we go? Or wait?"
         assert looks_like_question(text) is True
 
     def test_question_mark_inside_quoted_text(self):
-        # We don't try to be too clever — quoted "?" still triggers. This
+        # We don't try to be clever — a quoted "?" still triggers. This
         # is documented as acceptable false-positive territory.
-        text = 'Он спросил: «Что делать?» — но я не ответил.'
+        text = 'He asked: "Now what?" — but I didn\'t reply.'
         assert looks_like_question(text) is True
 
     def test_only_whitespace(self):
@@ -104,26 +110,26 @@ class TestGetLastAssistantText:
         p.write_text(
             json.dumps({
                 "type": "assistant",
-                "message": {"content": [{"type": "text", "text": "Привет!"}]},
+                "message": {"content": [{"type": "text", "text": "Hello!"}]},
             }) + "\n",
             encoding="utf-8",
         )
-        assert get_last_assistant_text(str(p)) == "Привет!"
+        assert get_last_assistant_text(str(p)) == "Hello!"
 
     def test_returns_last_when_multiple_assistant_messages(self, tmp_path):
         p = tmp_path / "transcript.jsonl"
         lines = [
-            json.dumps({"type": "user", "message": {"content": "вопрос"}}),
+            json.dumps({"type": "user", "message": {"content": "first question"}}),
             json.dumps({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "первый ответ"},
+                {"type": "text", "text": "first answer"},
             ]}}),
-            json.dumps({"type": "user", "message": {"content": "ещё вопрос"}}),
+            json.dumps({"type": "user", "message": {"content": "another question"}}),
             json.dumps({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "последний ответ"},
+                {"type": "text", "text": "last answer"},
             ]}}),
         ]
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        assert get_last_assistant_text(str(p)) == "последний ответ"
+        assert get_last_assistant_text(str(p)) == "last answer"
 
     def test_concatenates_multiple_text_blocks(self, tmp_path):
         p = tmp_path / "transcript.jsonl"
@@ -131,16 +137,16 @@ class TestGetLastAssistantText:
             json.dumps({
                 "type": "assistant",
                 "message": {"content": [
-                    {"type": "text", "text": "часть 1"},
+                    {"type": "text", "text": "part 1"},
                     {"type": "tool_use", "name": "Bash"},
-                    {"type": "text", "text": "часть 2"},
+                    {"type": "text", "text": "part 2"},
                 ]},
             }) + "\n",
             encoding="utf-8",
         )
         result = get_last_assistant_text(str(p))
-        assert "часть 1" in result
-        assert "часть 2" in result
+        assert "part 1" in result
+        assert "part 2" in result
 
     def test_skips_malformed_json_lines(self, tmp_path):
         p = tmp_path / "transcript.jsonl"
@@ -155,7 +161,7 @@ class TestGetLastAssistantText:
         assert get_last_assistant_text(str(p)) == "valid"
 
     def test_role_field_format(self, tmp_path):
-        # Alternative format: top-level role+content (not type+message)
+        # Alternative shape: top-level role+content (not type+message)
         p = tmp_path / "transcript.jsonl"
         p.write_text(
             json.dumps({"role": "assistant", "content": "plain string content"})
@@ -167,7 +173,7 @@ class TestGetLastAssistantText:
     def test_skips_user_messages(self, tmp_path):
         p = tmp_path / "transcript.jsonl"
         p.write_text(
-            json.dumps({"type": "user", "message": {"content": "из user"}})
+            json.dumps({"type": "user", "message": {"content": "from user"}})
             + "\n",
             encoding="utf-8",
         )
