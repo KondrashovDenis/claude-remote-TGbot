@@ -23,12 +23,12 @@ assistant message contains a question mark, the hook returns a
 to re-issue the question through the mcp__remote-bot__ask tool
 instead of leaving it as plain text in the chat.
 """
+import json
 import os
 import re
 import sys
-import json
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Force UTF-8 on stdin/stdout/stderr — payload may contain non-ASCII text
 try:

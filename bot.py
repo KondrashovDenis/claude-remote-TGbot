@@ -12,21 +12,21 @@ Run as a daemon:
 Run with console output (debug):
     python bot.py
 """
-import os
-import sys
 import json
 import logging
-from pathlib import Path
+import os
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 

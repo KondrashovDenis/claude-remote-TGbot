@@ -1,4 +1,4 @@
-name: tests
+name: CI
 
 on:
   push:
@@ -31,5 +31,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run pytest
-        run: pytest
+      - name: Run pytest with coverage
+        run: pytest --cov=notify --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false

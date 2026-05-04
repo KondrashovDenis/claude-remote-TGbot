@@ -24,14 +24,14 @@ Stdout output (JSON, the PreToolUse format):
                           "permissionDecision": "deny",
                           "permissionDecisionReason": "..."}} — denied
 """
+import fnmatch
+import json
 import os
 import sys
-import json
 import time
 import uuid
-import fnmatch
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Force UTF-8 on stdin/stdout/stderr — otherwise non-ASCII chars in the
 # payload (e.g. Bash description) get mangled by the Windows OEM codepage

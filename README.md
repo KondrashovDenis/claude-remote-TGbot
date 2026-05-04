@@ -2,7 +2,11 @@
 
 > 🇬🇧 English · [🇷🇺 Русский](README.ru.md)
 
-[![tests](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/tests.yml/badge.svg)](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/tests.yml)
+[![CI](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/ci.yml/badge.svg)](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/ci.yml)
+[![lint](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/lint.yml/badge.svg)](https://github.com/KondrashovDenis/claude-remote-TGbot/actions/workflows/lint.yml)
+[![codecov](https://codecov.io/gh/KondrashovDenis/claude-remote-TGbot/graph/badge.svg)](https://codecov.io/gh/KondrashovDenis/claude-remote-TGbot)
+[![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A Telegram bridge for **Claude Desktop / Claude Code**: approve tool calls and **answer Claude's questions in plain text** straight from Telegram while you're away from your computer.
 

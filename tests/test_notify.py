@@ -18,8 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from notify import looks_like_question, get_last_assistant_text  # noqa: E402
-
+from notify import get_last_assistant_text, looks_like_question  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # looks_like_question

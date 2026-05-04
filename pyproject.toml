@@ -4,3 +4,14 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["state", "logs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E501 — line too long is handled by line-length above; some long URL/log
+# format strings exceed 120 in practice and are easier to leave alone.
+ignore = ["E501"]

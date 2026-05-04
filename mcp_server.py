@@ -19,13 +19,13 @@ Architecture:
 
 Started by Claude Code's MCP harness (~/.claude/mcp.json) at session start.
 """
+import json
 import os
 import sys
-import json
 import time
 import uuid
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 try:
     sys.stdin.reconfigure(encoding="utf-8")
