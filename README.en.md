@@ -134,8 +134,7 @@ In `~/.claude/mcp.json` (or whatever your client uses):
   "permissions": {
     "allow": [
       "ToolSearch",
-      "mcp__remote-bot__ask",
-      "Bash(*claude-remote-TGbot*)"
+      "mcp__remote-bot__ask"
     ]
   },
   "env": {

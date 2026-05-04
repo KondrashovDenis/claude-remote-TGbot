@@ -134,8 +134,7 @@ pip install -r requirements.txt
   "permissions": {
     "allow": [
       "ToolSearch",
-      "mcp__remote-bot__ask",
-      "Bash(*claude-remote-TGbot*)"
+      "mcp__remote-bot__ask"
     ]
   },
   "env": {

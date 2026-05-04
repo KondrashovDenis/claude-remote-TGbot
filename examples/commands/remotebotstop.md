@@ -3,18 +3,19 @@ description: Остановить Claude Remote Bot — вернуться к л
 allowed-tools: Bash, Read
 ---
 
-Останови Claude Remote Bot **одной Bash-командой**:
+Останови Claude Remote Bot **одной Bash-командой** без `cd` (абсолютные пути,
+чтобы избежать Desktop-UI защиты от untrusted git hooks):
 
 ```bash
-# Замени путь на свой каталог установки
-cd /path/to/claude-remote-bot
+# Замени BOT_HOME на абсолютный путь к каталогу установки
+BOT_HOME=/path/to/claude-remote-TGbot
 
 # 1. Удалить флаг — сразу passthrough даже если bot ещё жив
-[ -f state/active ] && rm -f state/active && echo "[1] state/active удалён" || echo "[1] state/active отсутствует"
+[ -f "$BOT_HOME/state/active" ] && rm -f "$BOT_HOME/state/active" && echo "[1] state/active удалён" || echo "[1] state/active отсутствует"
 
 # 2-3. PID + kill
-if [ -f state/bot.pid ]; then
-  PID=$(cat state/bot.pid)
+if [ -f "$BOT_HOME/state/bot.pid" ]; then
+  PID=$(cat "$BOT_HOME/state/bot.pid")
   if taskkill //PID $PID //F 2>/dev/null; then
     echo "[2-3] killed PID $PID"
   else
@@ -23,7 +24,7 @@ if [ -f state/bot.pid ]; then
     fi
     echo "[2-3] PID $PID уже мёртв"
   fi
-  rm -f state/bot.pid
+  rm -f "$BOT_HOME/state/bot.pid"
   echo "[4] bot.pid удалён"
   echo
   echo "Remote Bot остановлен (PID был: $PID). Подтверждения снова обрабатываются локально в Claude Desktop / Code."
@@ -34,4 +35,4 @@ fi
 
 Если `taskkill` упал не из-за "процесса нет, но процесс жив" — попроси пользователя убить вручную через Диспетчер задач.
 
-После остановки `state/active` удалён, `pending tool calls` пройдут обычным flow через Desktop UI prompt.
+После остановки `state/active` удалён, последующие tool calls пройдут обычным flow через Desktop UI prompt.
