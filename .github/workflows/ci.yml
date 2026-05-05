@@ -32,7 +32,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run pytest with coverage
-        run: pytest --cov=notify --cov-report=xml --cov-report=term
+        run: pytest --cov=notify --cov=manage --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'

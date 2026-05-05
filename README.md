@@ -76,6 +76,7 @@ This bot covers both cases:
 ├── hook.py                 # PreToolUse hook: permissions.allow filter + push approve/deny
 ├── notify.py               # Stop / Notification hook: question detection + push notif
 ├── mcp_server.py           # MCP server: `ask` tool for two-way dialogue
+├── manage.py               # cross-platform start/stop/status CLI (psutil)
 ├── requirements.txt
 ├── .env.example
 ├── examples/
@@ -229,7 +230,7 @@ While active:
 
 ## Known limitations
 
-- **Current implementation is Windows-only.** Uses `pythonw`, `tasklist`, `taskkill`. A Linux/macOS port replaces these with `nohup`/`pkill`/`ps`
+- **Cross-platform via `manage.py`.** Process spawn/kill goes through `psutil` (Linux / macOS / Windows). The slash commands wrap `python manage.py {start,stop,status}`
 - **The hook fires on EVERY tool use** while the bot is active (including Read/Glob/Grep). Most are auto-approved via `permissions.allow`, but the script still runs each time. Narrow it via `matcher` in settings.json if it's noisy
 - **Bot is a separate process — survives Claude restart.** If you restart Claude Desktop without `/remotebotstop`, bot.py keeps running while the MCP session is recreated; the link can break briefly. For a clean restart: `/remotebotstop` → restart → `/remotebotstart`
 - **Question detection heuristic is simple (`?` only).** Questions phrased without a `?` go undetected (false negative). False positives are unlikely but possible on quotes
@@ -242,8 +243,8 @@ While active:
 cat state/active && echo "active"
 cat state/bot.pid
 
-# Bot alive?
-tasklist //FI "PID eq $(cat state/bot.pid)"
+# Bot alive? (cross-platform)
+python manage.py status
 
 # Logs
 tail -f logs/bot.log     # daemon

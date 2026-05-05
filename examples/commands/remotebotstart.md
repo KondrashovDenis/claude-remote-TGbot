@@ -5,53 +5,22 @@ allowed-tools: Bash, Read
 
 Start Claude Remote Bot for remote tool-call approval via Telegram.
 
-Run this as **a single Bash command** without `cd` (absolute paths
-matter — they avoid the Desktop-UI guard against untrusted git hooks
-that triggers on any `cd ...; X` command):
-
 ```bash
-# Replace BOT_HOME with the absolute path to your install directory.
-BOT_HOME=/path/to/claude-remote-TGbot
-
-# 1. Config check
-test -f "$BOT_HOME/.env" || { echo "FAIL: create .env from .env.example"; exit 1; }
-
-# 2. Dependency check
-python -c "import telegram, dotenv, requests" 2>&1 || { echo "deps missing, installing..."; pip install -q -r "$BOT_HOME/requirements.txt"; }
-
-# 3. Already running?
-if [ -f "$BOT_HOME/state/bot.pid" ]; then
-  PID=$(cat "$BOT_HOME/state/bot.pid")
-  if tasklist //FI "PID eq $PID" //NH 2>/dev/null | grep -q "$PID"; then
-    [ ! -f "$BOT_HOME/state/active" ] && touch "$BOT_HOME/state/active"
-    echo "Bot already running (PID: $PID)"; exit 0
-  fi
-  rm -f "$BOT_HOME/state/bot.pid"
-fi
-
-# 4-5. Launch + flag
-pythonw "$BOT_HOME/bot.py" &
-touch "$BOT_HOME/state/active"
-sleep 3
-
-# 6-7. Verify
-if [ -f "$BOT_HOME/state/bot.pid" ] && tasklist //FI "PID eq $(cat $BOT_HOME/state/bot.pid)" //NH 2>/dev/null | grep -q "$(cat $BOT_HOME/state/bot.pid)"; then
-  echo "Remote Bot started (PID: $(cat $BOT_HOME/state/bot.pid)). Tool requests outside permissions.allow will be pushed to Telegram until /remotebotstop."
-  echo "Log: $BOT_HOME/logs/bot.log"
-else
-  echo "FAIL: bot did not start. Log:"
-  tail -20 "$BOT_HOME/logs/bot.log" 2>/dev/null
-fi
+# Replace with your install path
+python /path/to/claude-remote-TGbot/manage.py start
 ```
 
-After start: send `/start` or `/status` to the bot in Telegram — it should reply with "ACTIVE".
+`manage.py` is cross-platform (Linux / macOS / Windows) — it spawns
+`bot.py` detached from the current shell via `psutil` and creates
+the `state/active` flag.
+
+After start: send `/start` or `/status` to the bot in Telegram — it
+should reply with "ACTIVE".
 
 **Important:** TG pushes happen **only** for tool calls that are NOT
 covered by `permissions.allow` in `~/.claude/settings.json`.
 Auto-approved tools (Bash entries in the allow list, MCP tools, etc.)
 flow through without a push.
-
-If anything fails on any step, surface the error — don't pretend it succeeded.
 
 ---
 
@@ -62,15 +31,15 @@ session, until `/remotebotstop`:
 
 **Whenever you need to ask the user a question or request a decision**
 (picking between options, clarifying a parameter, "what should we name it",
-"should we proceed", and so on) — **ALWAYS use the
-`mcp__remote-bot__ask` tool** INSTEAD of asking as plain text in chat.
+"should we proceed", etc.) — **ALWAYS use the `mcp__remote-bot__ask`
+tool** INSTEAD of asking as plain text in chat.
 
 ```
 mcp__remote-bot__ask(question="Which filename — A or B?", timeout_seconds=600)
 ```
 
 The tool returns:
-- **The user's reply text** — you receive it as the tool result and continue working
+- **The user's reply text** — you receive it as the tool result and continue
 - **"ERROR: ..."** — fall back to a regular text question in chat
 
 After `/remotebotstop` the tool automatically returns ERROR (state/active

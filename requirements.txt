@@ -2,3 +2,4 @@ python-telegram-bot>=21.0
 python-dotenv>=1.0
 requests>=2.31
 mcp>=1.0
+psutil>=5.9
