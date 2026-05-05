@@ -192,13 +192,7 @@ class TestStop:
         # Fake the psutil module: the Process(pid) call returns a mock
         # whose terminate() / wait() succeed without exceptions.
         fake_proc = MagicMock()
-        fake_psutil = MagicMock()
-        fake_psutil.Process.return_value = fake_proc
-        # Pre-define the exception classes so `except psutil.X` doesn't
-        # trip over a non-Exception MagicMock.
-        fake_psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
-        fake_psutil.AccessDenied = type("AccessDenied", (Exception,), {})
-        fake_psutil.TimeoutExpired = type("TimeoutExpired", (Exception,), {})
+        fake_psutil = _make_fake_psutil(process=fake_proc)
         monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
 
         rc = manage.cmd_stop()
@@ -207,3 +201,168 @@ class TestStop:
         assert "killed PID 4242" in out
         assert "Remote Bot stopped" in out
         fake_proc.terminate.assert_called_once()
+
+    def test_terminate_timeout_falls_through_to_kill(self, tmp_env, monkeypatch, capsys):
+        manage.PID_FILE.write_text("4242")
+        monkeypatch.setattr(manage, "_is_running", lambda pid: True)
+
+        fake_psutil = _make_fake_psutil()
+        # First wait() raises TimeoutExpired → kill() then second wait()
+        fake_psutil.Process.return_value.wait.side_effect = [
+            fake_psutil.TimeoutExpired("boom"),
+            None,
+        ]
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+
+        rc = manage.cmd_stop()
+        assert rc == 0
+        fake_psutil.Process.return_value.kill.assert_called_once()
+
+    def test_no_such_process_during_kill(self, tmp_env, monkeypatch, capsys):
+        manage.PID_FILE.write_text("4242")
+        monkeypatch.setattr(manage, "_is_running", lambda pid: True)
+
+        fake_psutil = _make_fake_psutil()
+        fake_psutil.Process.side_effect = fake_psutil.NoSuchProcess("gone")
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+
+        rc = manage.cmd_stop()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "disappeared" in out
+
+    def test_access_denied_returns_1(self, tmp_env, monkeypatch, capsys):
+        manage.PID_FILE.write_text("4242")
+        monkeypatch.setattr(manage, "_is_running", lambda pid: True)
+
+        fake_psutil = _make_fake_psutil()
+        fake_psutil.Process.side_effect = fake_psutil.AccessDenied("nope")
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+
+        rc = manage.cmd_stop()
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "no permission" in err
+
+
+# ---------------------------------------------------------------------------
+# _is_running internal helper
+# ---------------------------------------------------------------------------
+
+class TestIsRunning:
+    def test_no_such_process_returns_false(self, monkeypatch):
+        fake_psutil = _make_fake_psutil()
+        fake_psutil.Process.side_effect = fake_psutil.NoSuchProcess("x")
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+        assert manage._is_running(123) is False
+
+    def test_not_running_returns_false(self, monkeypatch):
+        fake_psutil = _make_fake_psutil()
+        fake_psutil.Process.return_value.is_running.return_value = False
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+        assert manage._is_running(123) is False
+
+    def test_zombie_returns_false(self, monkeypatch):
+        fake_psutil = _make_fake_psutil()
+        fake_psutil.Process.return_value.is_running.return_value = True
+        fake_psutil.Process.return_value.status.return_value = "zombie"
+        fake_psutil.STATUS_ZOMBIE = "zombie"
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+        assert manage._is_running(123) is False
+
+    def test_python_process_returns_true(self, monkeypatch):
+        fake_psutil = _make_fake_psutil()
+        proc = fake_psutil.Process.return_value
+        proc.is_running.return_value = True
+        proc.status.return_value = "running"
+        proc.name.return_value = "python.exe"
+        fake_psutil.STATUS_ZOMBIE = "zombie"
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+        assert manage._is_running(123) is True
+
+    def test_unknown_name_but_cmdline_matches_bot_py(self, monkeypatch):
+        fake_psutil = _make_fake_psutil()
+        proc = fake_psutil.Process.return_value
+        proc.is_running.return_value = True
+        proc.status.return_value = "running"
+        proc.name.return_value = "myapp"
+        proc.cmdline.return_value = ["/usr/bin/something", "/path/bot.py"]
+        fake_psutil.STATUS_ZOMBIE = "zombie"
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+        assert manage._is_running(123) is True
+
+    def test_unknown_name_unknown_cmdline_returns_false(self, monkeypatch):
+        fake_psutil = _make_fake_psutil()
+        proc = fake_psutil.Process.return_value
+        proc.is_running.return_value = True
+        proc.status.return_value = "running"
+        proc.name.return_value = "totally-different"
+        proc.cmdline.return_value = ["/usr/bin/totally-different"]
+        fake_psutil.STATUS_ZOMBIE = "zombie"
+        monkeypatch.setattr(manage, "_load_psutil", lambda: fake_psutil)
+        assert manage._is_running(123) is False
+
+
+# ---------------------------------------------------------------------------
+# _read_pid
+# ---------------------------------------------------------------------------
+
+class TestReadPid:
+    def test_missing_file_returns_none(self, tmp_env):
+        assert manage._read_pid() is None
+
+    def test_malformed_content_returns_none(self, tmp_env):
+        manage.PID_FILE.write_text("not-a-number")
+        assert manage._read_pid() is None
+
+    def test_valid_pid_returned_as_int(self, tmp_env):
+        manage.PID_FILE.write_text("12345\n")
+        assert manage._read_pid() == 12345
+
+
+# ---------------------------------------------------------------------------
+# cmd_start failure branches
+# ---------------------------------------------------------------------------
+
+class TestStartFailure:
+    def test_spawn_timeout_returns_1(self, tmp_env, monkeypatch, capsys):
+        """If bot.py never writes its PID file, cmd_start gives up after 5s."""
+        manage.ENV_FILE.write_text("TOKEN=x")
+        monkeypatch.setattr(manage, "_spawn_bot", lambda: 9999)
+        monkeypatch.setattr(manage, "_is_running", lambda pid: False)
+        # Skip the real sleep so the polling loop hits its deadline instantly
+        monkeypatch.setattr(manage.time, "sleep", lambda *_a, **_k: None)
+        # Make time.time() jump past the deadline on every call after the
+        # first, so the loop body executes once then exits.
+        ticks = iter([0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0])
+        monkeypatch.setattr(manage.time, "time",
+                            lambda: next(ticks, 1000.0))
+
+        rc = manage.cmd_start()
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "did not start" in err
+
+
+# ---------------------------------------------------------------------------
+# main() happy paths
+# ---------------------------------------------------------------------------
+
+class TestMainHappyPath:
+    def test_main_status_dispatches(self, tmp_env, monkeypatch, capsys):
+        rc = manage.main(["status"])
+        # cmd_status returns 0 even when nothing is running
+        assert rc == 0
+        assert "NOT running" in capsys.readouterr().out
+
+
+def _make_fake_psutil(*, process=None):
+    """Build a MagicMock that quacks like the psutil module enough for tests."""
+    fake = MagicMock()
+    fake.Process.return_value = process if process is not None else MagicMock()
+    fake.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+    fake.AccessDenied = type("AccessDenied", (Exception,), {})
+    fake.ZombieProcess = type("ZombieProcess", (Exception,), {})
+    fake.TimeoutExpired = type("TimeoutExpired", (Exception,), {})
+    fake.STATUS_ZOMBIE = "zombie"
+    return fake
